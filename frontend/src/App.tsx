@@ -396,7 +396,7 @@ function Reservations() {
       )}
     </div>
   );
-}
+} 
 
 function Session() {
   return (
