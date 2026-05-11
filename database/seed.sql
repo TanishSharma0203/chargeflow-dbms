@@ -18,9 +18,9 @@ INSERT INTO chargers (station_id, charger_code, charger_type, power_kw, status) 
 (2, 'EV-CS-FAST-20', 'FAST', 150, 'maintenance'),
 (3, 'GP-DT-DC-07', 'DC', 50, 'available');
 
-INSERT INTO reservations (user_id, charger_id, start_time, end_time, status) VALUES
-(1, 1, NOW() + interval '2 hour', NOW() + interval '3 hour', 'confirmed'),
-(2, 6, NOW() + interval '1 day', NOW() + interval '1 day 1 hour', 'confirmed');
+INSERT INTO reservations (user_id, charger_id, start_time, end_time, status, booking_fee) VALUES
+(1, 1, NOW() + interval '2 hour', NOW() + interval '3 hour', 'confirmed', 49.00),
+(2, 6, NOW() + interval '1 day', NOW() + interval '1 day 1 hour', 'confirmed', 49.00);
 
 INSERT INTO reviews (user_id, station_id, rating, comment) VALUES
 (1, 1, 5, 'Fast, clean and seamless reservation process.'),

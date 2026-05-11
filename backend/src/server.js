@@ -11,6 +11,7 @@ dotenv.config();
 const app = express();
 const port = process.env.PORT || 5000;
 const jwtSecret = process.env.JWT_SECRET || "chargeflow_dev_secret";
+const bookingFee = Number(process.env.BOOKING_FEE || 49);
 
 const pool = new Pool({
   user: process.env.DB_USER || "postgres",
@@ -49,6 +50,174 @@ const auth = async (req, res, next) => {
     });
   }
 };
+
+const assertUserHasNoOverlappingReservation = async (
+  client,
+  userId,
+  startIso,
+  endIso,
+  excludeReservationId
+) => {
+  const params = [userId, startIso, endIso];
+  let sql = `
+    SELECT id
+    FROM reservations
+    WHERE user_id=$1
+    AND status IN ('confirmed','active')
+    AND tstzrange(start_time, end_time, '[)')
+    && tstzrange($2::timestamptz, $3::timestamptz, '[)')
+  `;
+
+  if (excludeReservationId) {
+    params.push(excludeReservationId);
+
+    sql += ` AND id <> $${params.length}`;
+  }
+
+  const overlap = await client.query(sql, params);
+
+  return overlap.rowCount === 0;
+};
+
+const assertChargerSlotFree = async (
+  client,
+  chargerId,
+  startIso,
+  endIso,
+  excludeReservationId
+) => {
+  const params = [chargerId, startIso, endIso];
+  let sql = `
+    SELECT id
+    FROM reservations
+    WHERE charger_id=$1
+    AND status IN ('confirmed','active')
+    AND tstzrange(start_time, end_time, '[)')
+    && tstzrange($2::timestamptz, $3::timestamptz, '[)')
+  `;
+
+  if (excludeReservationId) {
+    params.push(excludeReservationId);
+
+    sql += ` AND id <> $${params.length}`;
+  }
+
+  const overlap = await client.query(sql, params);
+
+  return overlap.rowCount === 0;
+};
+
+app.get("/api/users/me", auth, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `
+      SELECT id, name, email, phone, vehicle_type, created_at
+      FROM users
+      WHERE id=$1
+      `,
+      [req.user.id]
+    );
+
+    if (!result.rowCount) {
+      return res.status(404).json({
+        message: "User not found",
+      });
+    }
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).json({
+      message: "Failed to load profile",
+    });
+  }
+});
+
+app.get("/api/users/me/account", auth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const [
+      activeList,
+      sessionPayments,
+      bookingFees,
+    ] = await Promise.all([
+      pool.query(
+        `
+        SELECT r.*,
+        c.charger_type,
+        c.charger_code,
+        s.id AS station_id,
+        s.station_name,
+        s.location
+        FROM reservations r
+        JOIN chargers c ON c.id=r.charger_id
+        JOIN charging_stations s ON s.id=c.station_id
+        WHERE r.user_id=$1
+        AND r.status IN ('confirmed','active')
+        ORDER BY r.start_time ASC
+        `,
+        [userId]
+      ),
+
+      pool.query(
+        `
+        SELECT p.id,
+        p.amount,
+        p.payment_status,
+        p.payment_method,
+        p.paid_at,
+        r.id AS reservation_id,
+        s.station_name
+        FROM payments p
+        JOIN charging_sessions cs ON cs.id=p.session_id
+        JOIN reservations r ON r.id=cs.reservation_id
+        JOIN chargers c ON c.id=r.charger_id
+        JOIN charging_stations s ON s.id=c.station_id
+        WHERE r.user_id=$1
+        ORDER BY p.paid_at DESC
+        `,
+        [userId]
+      ),
+
+      pool.query(
+        `
+        SELECT r.id AS reservation_id,
+        r.booking_fee AS amount,
+        r.created_at AS charged_at,
+        s.station_name
+        FROM reservations r
+        JOIN chargers c ON c.id=r.charger_id
+        JOIN charging_stations s ON s.id=c.station_id
+        WHERE r.user_id=$1
+        AND r.booking_fee > 0
+        ORDER BY r.created_at DESC
+        `,
+        [userId]
+      ),
+    ]);
+
+    res.json({
+      activeReservationsCount: activeList.rowCount,
+      activeReservations: activeList.rows,
+      sessionPayments: sessionPayments.rows,
+      bookingFees: bookingFees.rows,
+      bookingFeePolicy: {
+        amount: bookingFee,
+        nonRefundable: true,
+        description:
+          "A non-refundable booking fee is charged per reservation to prevent slot spam. You can only hold one active time window at a time (no overlapping bookings).",
+      },
+    });
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).json({
+      message: "Failed to load account",
+    });
+  }
+});
 
 app.get("/api/health", async (_req, res) => {
   try {
@@ -240,7 +409,9 @@ app.get("/api/stations", async (req, res) => {
    RESERVATIONS
 ========================= */
 
-app.post("/api/reservations", async (req, res) => {
+app.post("/api/reservations", auth, async (req, res) => {
+  const client = await pool.connect();
+
   try {
     const {
       charger_id,
@@ -258,30 +429,51 @@ app.post("/api/reservations", async (req, res) => {
       });
     }
 
-    const overlap = await pool.query(
-      `
-      SELECT id
-      FROM reservations
-      WHERE charger_id=$1
-      AND status IN ('confirmed','active')
-      AND tstzrange(start_time, end_time, '[)')
-      &&
-      tstzrange($2::timestamptz, $3::timestamptz, '[)')
-      `,
-      [
-        charger_id,
-        start_time,
-        end_time,
-      ]
-    );
+    const startIso = new Date(start_time).toISOString();
+    const endIso = new Date(end_time).toISOString();
 
-    if (overlap.rowCount) {
-      return res.status(409).json({
-        message: "Slot unavailable",
+    if (new Date(endIso) <= new Date(startIso)) {
+      return res.status(400).json({
+        message: "End time must be after start time",
       });
     }
 
-    const reservation = await pool.query(
+    await client.query("BEGIN");
+
+    const userOk = await assertUserHasNoOverlappingReservation(
+      client,
+      req.user.id,
+      startIso,
+      endIso,
+      null
+    );
+
+    if (!userOk) {
+      await client.query("ROLLBACK");
+
+      return res.status(409).json({
+        message:
+          "You already have an active reservation that overlaps this time. Only one booking window is allowed at a time.",
+      });
+    }
+
+    const chargerOk = await assertChargerSlotFree(
+      client,
+      charger_id,
+      startIso,
+      endIso,
+      null
+    );
+
+    if (!chargerOk) {
+      await client.query("ROLLBACK");
+
+      return res.status(409).json({
+        message: "Slot unavailable for this charger",
+      });
+    }
+
+    const reservation = await client.query(
       `
       INSERT INTO reservations
       (
@@ -289,30 +481,185 @@ app.post("/api/reservations", async (req, res) => {
         charger_id,
         start_time,
         end_time,
-        status
+        status,
+        booking_fee
       )
-      VALUES ($1,$2,$3,$4,'confirmed')
+      VALUES ($1,$2,$3,$4,'confirmed',$5)
       RETURNING *
       `,
       [
-        1,
+        req.user.id,
         charger_id,
-        new Date(start_time).toISOString(),
-        new Date(end_time).toISOString(),
+        startIso,
+        endIso,
+        bookingFee,
       ]
     );
 
+    await client.query("COMMIT");
+
     res.status(201).json({
       success: true,
+      bookingFeeCharged: bookingFee,
+      bookingFeeNonRefundable: true,
       reservation: reservation.rows[0],
     });
   } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (_) {
+      // no transaction to roll back
+    }
+
     console.error("Reservation Error:", error);
 
     res.status(500).json({
       message: "Reservation creation failed",
       detail: error.message,
     });
+  } finally {
+    client.release();
+  }
+});
+
+app.patch("/api/reservations/:id", auth, async (req, res) => {
+  const reservationId = Number(req.params.id);
+
+  if (!Number.isFinite(reservationId)) {
+    return res.status(400).json({
+      message: "Invalid reservation id",
+    });
+  }
+
+  const {
+    charger_id,
+    start_time,
+    end_time,
+  } = req.body;
+
+  const existing = await pool.query(
+    `
+    SELECT r.*
+    FROM reservations r
+    WHERE r.id=$1 AND r.user_id=$2
+    `,
+    [reservationId, req.user.id]
+  );
+
+  if (!existing.rowCount) {
+    return res.status(404).json({
+      message: "Reservation not found",
+    });
+  }
+
+  const row = existing.rows[0];
+
+  if (row.status !== "confirmed") {
+    return res.status(400).json({
+      message:
+        "Only confirmed reservations can be changed. Active or completed bookings cannot be edited here.",
+    });
+  }
+
+  const nextChargerId = charger_id ?? row.charger_id;
+  const nextStartIso = start_time
+    ? new Date(start_time).toISOString()
+    : new Date(row.start_time).toISOString();
+  const nextEndIso = end_time
+    ? new Date(end_time).toISOString()
+    : new Date(row.end_time).toISOString();
+
+  if (new Date(nextEndIso) <= new Date(nextStartIso)) {
+    return res.status(400).json({
+      message: "End time must be after start time",
+    });
+  }
+
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const userOk = await assertUserHasNoOverlappingReservation(
+      client,
+      req.user.id,
+      nextStartIso,
+      nextEndIso,
+      reservationId
+    );
+
+    if (!userOk) {
+      await client.query("ROLLBACK");
+
+      return res.status(409).json({
+        message:
+          "This change overlaps another of your reservations. You can only have one active time window at a time.",
+      });
+    }
+
+    const chargerOk = await assertChargerSlotFree(
+      client,
+      nextChargerId,
+      nextStartIso,
+      nextEndIso,
+      reservationId
+    );
+
+    if (!chargerOk) {
+      await client.query("ROLLBACK");
+
+      return res.status(409).json({
+        message: "Slot unavailable for the selected charger",
+      });
+    }
+
+    const updated = await client.query(
+      `
+      UPDATE reservations
+      SET
+        charger_id=$2,
+        start_time=$3,
+        end_time=$4
+      WHERE id=$1 AND user_id=$5 AND status='confirmed'
+      RETURNING *
+      `,
+      [
+        reservationId,
+        nextChargerId,
+        nextStartIso,
+        nextEndIso,
+        req.user.id,
+      ]
+    );
+
+    if (!updated.rowCount) {
+      await client.query("ROLLBACK");
+
+      return res.status(400).json({
+        message: "Reservation could not be updated",
+      });
+    }
+
+    await client.query("COMMIT");
+
+    res.json({
+      success: true,
+      reservation: updated.rows[0],
+    });
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (_) {
+      // ignore
+    }
+
+    console.error("Reservation update error:", error);
+
+    res.status(500).json({
+      message: "Reservation update failed",
+    });
+  } finally {
+    client.release();
   }
 });
 

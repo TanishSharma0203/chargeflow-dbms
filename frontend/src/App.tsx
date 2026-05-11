@@ -1,6 +1,15 @@
-import { useEffect, useMemo, useState } from "react";
-import { Link, Navigate, Route, Routes } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import {
+  Link,
+  Navigate,
+  Route,
+  Routes,
+  useNavigate
+} from "react-router-dom";
 import axios from "axios";
+import toast from "react-hot-toast";
+import { api } from "./api/client";
+import { useAuth } from "./context/AuthContext";
 
 import {
   BatteryCharging,
@@ -35,6 +44,64 @@ type Station = {
   rating: number;
 };
 
+const BOOKING_FEE_DISPLAY =
+  import.meta.env.VITE_BOOKING_FEE ?? "49";
+
+function isoToDatetimeLocalValue(iso: string) {
+  const d = new Date(iso);
+  const pad = (n: number) => String(n).padStart(2, "0");
+
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+type ProfileRow = {
+  id: number;
+  name: string;
+  email: string;
+  phone: string;
+  vehicle_type: string;
+  created_at: string;
+};
+
+type ActiveReservation = {
+  id: number;
+  user_id: number;
+  charger_id: number;
+  start_time: string;
+  end_time: string;
+  status: string;
+  booking_fee: string | number;
+  station_name: string;
+  location: string;
+  charger_type: string;
+  charger_code: string;
+};
+
+type AccountPayload = {
+  activeReservationsCount: number;
+  activeReservations: ActiveReservation[];
+  sessionPayments: {
+    id: number;
+    amount: string | number;
+    payment_status: string;
+    payment_method: string;
+    paid_at: string;
+    reservation_id: number;
+    station_name: string;
+  }[];
+  bookingFees: {
+    reservation_id: number;
+    amount: string | number;
+    charged_at: string;
+    station_name: string;
+  }[];
+  bookingFeePolicy: {
+    amount: number;
+    nonRefundable: boolean;
+    description: string;
+  };
+};
+
 const stats = [
   { name: "Active Reservations", value: 124 },
   { name: "CO2 Saved (kg)", value: 5480 },
@@ -55,21 +122,49 @@ function Navbar({
   dark: boolean;
   toggleTheme: () => void;
 }) {
+  const { token, user, logout } = useAuth();
+
   return (
     <nav className="nav glass">
       <h1>ChargeFlow</h1>
 
       <div className="nav-links">
         <Link to="/">Home</Link>
-        <Link to="/dashboard">Dashboard</Link>
+
+        {token && (
+          <>
+            <Link to="/dashboard">Dashboard</Link>
+            <Link to="/account">My account</Link>
+            <Link to="/profile">Profile</Link>
+          </>
+        )}
+
         <Link to="/stations">Stations</Link>
         <Link to="/reservations">Reservation</Link>
         <Link to="/admin">Admin</Link>
       </div>
 
-      <button onClick={toggleTheme} className="btn secondary">
-        {dark ? "Light" : "Dark"} Mode
-      </button>
+      <div className="row">
+        {token && user && (
+          <span className="badge" style={{ opacity: 0.9 }}>
+            {user.name}
+          </span>
+        )}
+
+        {token ? (
+          <button type="button" className="btn secondary" onClick={logout}>
+            Logout
+          </button>
+        ) : (
+          <Link className="btn secondary" to="/auth">
+            Sign in
+          </Link>
+        )}
+
+        <button type="button" onClick={toggleTheme} className="btn secondary">
+          {dark ? "Light" : "Dark"} Mode
+        </button>
+      </div>
     </nav>
   );
 }
@@ -128,35 +223,158 @@ function Landing() {
 }
 
 function Auth() {
+  const { login, signup, token, loading } = useAuth();
+  const navigate = useNavigate();
+  const [loginEmail, setLoginEmail] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [signupName, setSignupName] = useState("");
+  const [signupEmail, setSignupEmail] = useState("");
+  const [signupPhone, setSignupPhone] = useState("");
+  const [signupVehicle, setSignupVehicle] = useState("");
+  const [signupPassword, setSignupPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  if (!loading && token) {
+    return <Navigate to="/dashboard" replace />;
+  }
+
+  const handleLogin = async (e: FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+
+    try {
+      await login(loginEmail.trim(), loginPassword);
+      toast.success("Signed in");
+      navigate("/dashboard", { replace: true });
+    } catch {
+      toast.error("Invalid email or password");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSignup = async (e: FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+
+    try {
+      await signup({
+        name: signupName.trim(),
+        email: signupEmail.trim(),
+        phone: signupPhone.trim(),
+        password: signupPassword,
+        vehicle_type: signupVehicle.trim(),
+      });
+      toast.success("Account created");
+      navigate("/dashboard", { replace: true });
+    } catch {
+      toast.error("Signup failed — check fields or try another email/phone");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="card form" style={{ maxWidth: 420 }}>
+        <p>Checking your session…</p>
+      </div>
+    );
+  }
+
   return (
     <div className="auth-wrap">
-      <form className="card form">
+      <form className="card form" onSubmit={handleLogin}>
         <h3>Login</h3>
-        <input placeholder="Email" />
-        <input placeholder="Password" type="password" />
-        <button className="btn">Sign In</button>
+
+        <input
+          placeholder="Email"
+          value={loginEmail}
+          onChange={(e) => setLoginEmail(e.target.value)}
+          autoComplete="email"
+        />
+
+        <input
+          placeholder="Password"
+          type="password"
+          value={loginPassword}
+          onChange={(e) => setLoginPassword(e.target.value)}
+          autoComplete="current-password"
+        />
+
+        <button className="btn" type="submit" disabled={busy}>
+          Sign In
+        </button>
       </form>
 
-      <form className="card form">
+      <form className="card form" onSubmit={handleSignup}>
         <h3>Signup</h3>
-        <input placeholder="Name" />
-        <input placeholder="Email" />
-        <input placeholder="Phone" />
-        <input placeholder="Vehicle Type" />
-        <input placeholder="Password" type="password" />
-        <button className="btn">Create Account</button>
+
+        <input
+          placeholder="Name"
+          value={signupName}
+          onChange={(e) => setSignupName(e.target.value)}
+        />
+
+        <input
+          placeholder="Email"
+          value={signupEmail}
+          onChange={(e) => setSignupEmail(e.target.value)}
+          autoComplete="email"
+        />
+
+        <input
+          placeholder="Phone"
+          value={signupPhone}
+          onChange={(e) => setSignupPhone(e.target.value)}
+        />
+
+        <input
+          placeholder="Vehicle Type"
+          value={signupVehicle}
+          onChange={(e) => setSignupVehicle(e.target.value)}
+        />
+
+        <input
+          placeholder="Password"
+          type="password"
+          value={signupPassword}
+          onChange={(e) => setSignupPassword(e.target.value)}
+          autoComplete="new-password"
+        />
+
+        <button className="btn" type="submit" disabled={busy}>
+          Create Account
+        </button>
       </form>
 
-      <form className="card form">
+      <div className="card form">
         <h3>Forgot Password</h3>
-        <input placeholder="Registered Email" />
-        <button className="btn secondary">Reset Link</button>
-      </form>
+
+        <p style={{ margin: 0, opacity: 0.85 }}>
+          Password reset is not wired yet — contact support or use seed
+          credentials for local demos.
+        </p>
+      </div>
     </div>
   );
 }
 
 function Dashboard() {
+  const { token, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <div className="card">
+        <p>Loading session…</p>
+      </div>
+    );
+  }
+
+  if (!token) {
+    return <Navigate to="/auth" replace />;
+  }
+
   return (
     <div className="grid">
       <article className="card">
@@ -228,16 +446,31 @@ function Dashboard() {
 function Stations() {
   const [stations, setStations] = useState<Station[]>([]);
   const [query, setQuery] = useState("");
+  const [suggestOpen, setSuggestOpen] = useState(false);
+  const searchWrapRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     fetchStations();
   }, []);
 
+  useEffect(() => {
+    const onPointerDown = (e: MouseEvent) => {
+      if (
+        searchWrapRef.current &&
+        !searchWrapRef.current.contains(e.target as Node)
+      ) {
+        setSuggestOpen(false);
+      }
+    };
+
+    document.addEventListener("mousedown", onPointerDown);
+
+    return () => document.removeEventListener("mousedown", onPointerDown);
+  }, []);
+
   const fetchStations = async () => {
     try {
-      const response = await axios.get(
-        "http://localhost:5000/api/stations"
-      );
+      const response = await api.get<Station[]>("/api/stations");
 
       setStations(response.data);
     } catch (error) {
@@ -245,23 +478,81 @@ function Stations() {
     }
   };
 
+  const suggestions = useMemo(() => {
+    const q = query.trim().toLowerCase();
+
+    const list = !q
+      ? stations.slice(0, 10)
+      : stations.filter(
+          (s) =>
+            s.station_name.toLowerCase().includes(q) ||
+            s.location.toLowerCase().includes(q)
+        ).slice(0, 12);
+
+    return list;
+  }, [query, stations]);
+
   const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+
+    if (!q) {
+      return stations;
+    }
+
     return stations.filter(
       (s) =>
-        s.station_name.toLowerCase().includes(query.toLowerCase()) ||
-        s.location.toLowerCase().includes(query.toLowerCase())
+        s.station_name.toLowerCase().includes(q) ||
+        s.location.toLowerCase().includes(q)
     );
   }, [query, stations]);
 
   return (
     <div>
-      <div className="row">
-        <input
-          className="search"
-          placeholder="Search stations, city, location..."
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-        />
+      <div className="row" style={{ alignItems: "flex-start" }}>
+        <div className="station-search-wrap" ref={searchWrapRef}>
+          <input
+            id="station-search"
+            className="search"
+            style={{ width: "100%" }}
+            placeholder="Type station name to search…"
+            value={query}
+            autoComplete="off"
+            role="combobox"
+            aria-expanded={suggestOpen}
+            aria-controls="station-suggest-list"
+            aria-autocomplete="list"
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setSuggestOpen(true);
+            }}
+            onFocus={() => setSuggestOpen(true)}
+          />
+
+          {suggestOpen && suggestions.length > 0 && (
+            <ul
+              id="station-suggest-list"
+              className="station-suggestions"
+              role="listbox"
+              aria-labelledby="station-search"
+            >
+              {suggestions.map((s) => (
+                <li
+                  key={s.id}
+                  role="option"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => {
+                    setQuery(s.station_name);
+                    setSuggestOpen(false);
+                  }}
+                >
+                  <strong>{s.station_name}</strong>
+
+                  <span className="station-suggest-meta">{s.location}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
 
         <span className="badge">
           AI Recommendations: ChargeFlow Nexus Hub
@@ -295,53 +586,85 @@ function Stations() {
 }
 
 function Reservations() {
+  const { token, loading } = useAuth();
   const [chargerId, setChargerId] = useState("");
   const [startTime, setStartTime] = useState("");
   const [endTime, setEndTime] = useState("");
   const [message, setMessage] = useState("");
 
   const handleReservation = async () => {
+    if (!token) {
+      setMessage("Please sign in to book a slot.");
+
+      return;
+    }
+
     try {
-      setMessage("Processing reservation...");
+      setMessage("Processing reservation…");
 
-      const response = await axios.post(
-        "http://localhost:5000/api/reservations",
-        {
-          charger_id: Number(chargerId),
-          start_time: new Date(startTime).toISOString(),
-          end_time: new Date(endTime).toISOString(),
-        }
-      );
-
-      console.log("Reservation Response:", response.data);
+      const response = await api.post("/api/reservations", {
+        charger_id: Number(chargerId),
+        start_time: new Date(startTime).toISOString(),
+        end_time: new Date(endTime).toISOString(),
+      });
 
       if (response.status === 201 || response.data.success) {
-        setMessage("Reservation successful!");
+        const fee = response.data.bookingFeeCharged ?? BOOKING_FEE_DISPLAY;
+
+        setMessage(
+          `Reservation confirmed. Non-refundable booking fee: Rs ${fee}`
+        );
+
+        toast.success("Reservation created");
 
         setChargerId("");
         setStartTime("");
         setEndTime("");
       } else {
-        setMessage(
-          "Reservation created but unexpected response received."
-        );
+        setMessage("Unexpected response from server.");
       }
     } catch (error) {
       console.error("Reservation Error:", error);
 
-      if (error.response?.data?.message) {
-        setMessage(error.response.data.message);
+      if (axios.isAxiosError(error) && error.response?.data?.message) {
+        setMessage(String(error.response.data.message));
+        toast.error(String(error.response.data.message));
+      } else if (axios.isAxiosError(error) && error.response?.status === 401) {
+        setMessage("Please sign in again.");
       } else {
         setMessage("Server connection error.");
       }
     }
   };
 
+  if (loading) {
+    return (
+      <div className="card form">
+        <p>Loading session…</p>
+      </div>
+    );
+  }
+
   return (
     <div className="card form">
       <h3>
-        <Bolt size={18} /> Reservation Workflow
+        <Bolt size={18} /> Reservation workflow
       </h3>
+
+      {!token && (
+        <p style={{ marginTop: 0 }}>
+          <Link to="/auth">Sign in</Link> to book. A non-refundable booking fee
+          of Rs {BOOKING_FEE_DISPLAY} applies per reservation and stops
+          overlapping spam bookings.
+        </p>
+      )}
+
+      {token && (
+        <p style={{ marginTop: 0, opacity: 0.9 }}>
+          Booking fee Rs {BOOKING_FEE_DISPLAY} (non-refundable) is charged when
+          you confirm. You cannot overlap another of your own active bookings.
+        </p>
+      )}
 
       <input
         placeholder="Enter Charger ID"
@@ -362,27 +685,26 @@ function Reservations() {
       />
 
       <div className="row">
-        <span className="badge">
-          Real-time slots: Available
-        </span>
+        <span className="badge">Booking fee: Rs {BOOKING_FEE_DISPLAY}</span>
 
-        <span className="badge">
-          QR Preview: CF-BOOK-2026-9211
-        </span>
-      </div>
-
-      <div className="card">
-        <p>
-          Payment summary: Estimated 24 kWh x Rs 19.5 = Rs 468
-        </p>
+        <span className="badge">One active time window per user</span>
       </div>
 
       <button
         className="btn"
+        type="button"
         onClick={handleReservation}
+        disabled={!token}
       >
-        Confirm Reservation
+        Confirm reservation
       </button>
+
+      {!token && (
+        <p style={{ marginTop: "8px", opacity: 0.85 }}>
+          Use <Link to="/auth">Sign in</Link> first — the button stays disabled
+          until you are logged in.
+        </p>
+      )}
 
       {message && (
         <p
@@ -434,6 +756,423 @@ function Admin() {
   );
 }
 
+function UserProfile() {
+  const { token, loading, logout } = useAuth();
+  const [profile, setProfile] = useState<ProfileRow | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!token) {
+      return;
+    }
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { data } = await api.get<ProfileRow>("/api/users/me");
+
+        if (!cancelled) {
+          setProfile(data);
+          setError("");
+        }
+      } catch (err) {
+        if (!cancelled) {
+          if (axios.isAxiosError(err) && err.response?.status === 401) {
+            logout();
+          } else {
+            setError("Could not load profile.");
+          }
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [token, logout]);
+
+  if (loading) {
+    return (
+      <div className="card">
+        <p>Loading session…</p>
+      </div>
+    );
+  }
+
+  if (!token) {
+    return <Navigate to="/auth" replace />;
+  }
+
+  if (error) {
+    return (
+      <div className="card">
+        <p>{error}</p>
+      </div>
+    );
+  }
+
+  if (!profile) {
+    return (
+      <div className="card">
+        <p>Loading profile…</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="grid" style={{ maxWidth: 720 }}>
+      <article className="card">
+        <p className="page-kicker">Your identity</p>
+
+        <h2 className="page-title">Profile</h2>
+
+        <p className="page-lead">
+          Details stored in ChargeFlow from your user record.
+        </p>
+
+        <table>
+          <tbody>
+            <tr>
+              <th>Name</th>
+              <td>{profile.name}</td>
+            </tr>
+            <tr>
+              <th>Email</th>
+              <td>{profile.email}</td>
+            </tr>
+            <tr>
+              <th>Phone</th>
+              <td>{profile.phone}</td>
+            </tr>
+            <tr>
+              <th>Vehicle</th>
+              <td>{profile.vehicle_type}</td>
+            </tr>
+            <tr>
+              <th>Member since</th>
+              <td>{new Date(profile.created_at).toLocaleString()}</td>
+            </tr>
+          </tbody>
+        </table>
+      </article>
+    </div>
+  );
+}
+
+function UserAccount() {
+  const { token, loading, logout } = useAuth();
+  const [data, setData] = useState<AccountPayload | null>(null);
+  const [loadError, setLoadError] = useState("");
+  const [selectedId, setSelectedId] = useState<number | "">("");
+  const [editCharger, setEditCharger] = useState("");
+  const [editStart, setEditStart] = useState("");
+  const [editEnd, setEditEnd] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const { data: payload } = await api.get<AccountPayload>(
+        "/api/users/me/account"
+      );
+
+      setData(payload);
+      setLoadError("");
+    } catch (err) {
+      if (axios.isAxiosError(err) && err.response?.status === 401) {
+        logout();
+
+        return;
+      }
+
+      setLoadError("Could not load your account.");
+    }
+  }, [logout]);
+
+  useEffect(() => {
+    if (!token) {
+      return;
+    }
+
+    load();
+  }, [token, load]);
+
+  useEffect(() => {
+    if (!data || selectedId === "") {
+      return;
+    }
+
+    const row = data.activeReservations.find((r) => r.id === selectedId);
+
+    if (row && row.status === "confirmed") {
+      setEditCharger(String(row.charger_id));
+      setEditStart(isoToDatetimeLocalValue(row.start_time));
+      setEditEnd(isoToDatetimeLocalValue(row.end_time));
+    }
+  }, [data, selectedId]);
+
+  if (loading) {
+    return (
+      <div className="card">
+        <p>Loading session…</p>
+      </div>
+    );
+  }
+
+  if (!token) {
+    return <Navigate to="/auth" replace />;
+  }
+
+  if (loadError) {
+    return (
+      <div className="card">
+        <p>{loadError}</p>
+      </div>
+    );
+  }
+
+  if (!data) {
+    return (
+      <div className="card">
+        <p>Loading account…</p>
+      </div>
+    );
+  }
+
+  const changeable = data.activeReservations.filter(
+    (r) => r.status === "confirmed"
+  );
+
+  const handleSaveReservation = async (e: FormEvent) => {
+    e.preventDefault();
+
+    if (selectedId === "") {
+      toast.error("Pick a reservation to update");
+
+      return;
+    }
+
+    setSaving(true);
+
+    try {
+      await api.patch(`/api/reservations/${selectedId}`, {
+        charger_id: Number(editCharger),
+        start_time: new Date(editStart).toISOString(),
+        end_time: new Date(editEnd).toISOString(),
+      });
+
+      toast.success("Reservation updated");
+      await load();
+    } catch (err) {
+      if (axios.isAxiosError(err) && err.response?.data?.message) {
+        toast.error(String(err.response.data.message));
+      } else {
+        toast.error("Update failed");
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="grid" style={{ maxWidth: 720 }}>
+      <article className="card page-intro">
+        <p className="page-kicker">Account & billing</p>
+
+        <h2 className="page-title">My account</h2>
+
+        <p className="page-lead">
+          Reservations you can change, booking fees, and charging payments.
+        </p>
+      </article>
+
+      <article className="stat">
+        <p>Active reservations</p>
+
+        <h3>{data.activeReservationsCount}</h3>
+      </article>
+
+      <article className="stat">
+        <p>Non-refundable booking fee (per new booking)</p>
+
+        <h3>Rs {data.bookingFeePolicy.amount}</h3>
+      </article>
+
+      <article className="card" style={{ gridColumn: "1 / -1" }}>
+        <h3>Booking rules</h3>
+
+        <p style={{ marginTop: 0, opacity: 0.9 }}>
+          {data.bookingFeePolicy.description}
+        </p>
+      </article>
+
+      <article className="card" style={{ gridColumn: "1 / -1" }}>
+        <h3>Active reservations</h3>
+
+        {data.activeReservations.length === 0 ? (
+          <p>No active or upcoming reservations.</p>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table>
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Station</th>
+                  <th>Charger</th>
+                  <th>Window</th>
+                  <th>Status</th>
+                  <th>Booking fee</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {data.activeReservations.map((r) => (
+                  <tr key={r.id}>
+                    <td>{r.id}</td>
+                    <td>{r.station_name}</td>
+                    <td>
+                      #{r.charger_id} ({r.charger_type})
+                    </td>
+                    <td>
+                      {new Date(r.start_time).toLocaleString()} →{" "}
+                      {new Date(r.end_time).toLocaleString()}
+                    </td>
+                    <td>{r.status}</td>
+                    <td>Rs {Number(r.booking_fee).toFixed(2)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </article>
+
+      <article className="card form" style={{ gridColumn: "1 / -1" }}>
+        <h3>Change a confirmed reservation</h3>
+
+        <p style={{ marginTop: 0, opacity: 0.85 }}>
+          You can reschedule or switch charger while status is{" "}
+          <strong>confirmed</strong>. The original booking fee stays
+          non-refundable.
+        </p>
+
+        {changeable.length === 0 ? (
+          <p>No confirmed reservations to edit.</p>
+        ) : (
+          <form onSubmit={handleSaveReservation}>
+            <label htmlFor="res-pick">Reservation</label>
+
+            <select
+              id="res-pick"
+              value={selectedId === "" ? "" : String(selectedId)}
+              onChange={(e) =>
+                setSelectedId(
+                  e.target.value ? Number(e.target.value) : ""
+                )
+              }
+            >
+              <option value="">Select…</option>
+
+              {changeable.map((r) => (
+                <option key={r.id} value={r.id}>
+                  #{r.id} — {r.station_name} (
+                  {new Date(r.start_time).toLocaleString()})
+                </option>
+              ))}
+            </select>
+
+            <input
+              placeholder="Charger ID"
+              value={editCharger}
+              onChange={(e) => setEditCharger(e.target.value)}
+            />
+
+            <input
+              type="datetime-local"
+              value={editStart}
+              onChange={(e) => setEditStart(e.target.value)}
+            />
+
+            <input
+              type="datetime-local"
+              value={editEnd}
+              onChange={(e) => setEditEnd(e.target.value)}
+            />
+
+            <button className="btn" type="submit" disabled={saving}>
+              Save changes
+            </button>
+          </form>
+        )}
+      </article>
+
+      <article className="card" style={{ gridColumn: "1 / -1" }}>
+        <h3>Booking fees charged (non-refundable)</h3>
+
+        {data.bookingFees.length === 0 ? (
+          <p>No booking fee records yet.</p>
+        ) : (
+          <table>
+            <thead>
+              <tr>
+                <th>Reservation</th>
+                <th>Station</th>
+                <th>Amount</th>
+                <th>Charged at</th>
+              </tr>
+            </thead>
+
+            <tbody>
+              {data.bookingFees.map((b) => (
+                <tr key={b.reservation_id}>
+                  <td>{b.reservation_id}</td>
+                  <td>{b.station_name}</td>
+                  <td>Rs {Number(b.amount).toFixed(2)}</td>
+                  <td>{new Date(b.charged_at).toLocaleString()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </article>
+
+      <article className="card" style={{ gridColumn: "1 / -1" }}>
+        <h3>Charging session payments</h3>
+
+        {data.sessionPayments.length === 0 ? (
+          <p>No completed charging payments yet.</p>
+        ) : (
+          <table>
+            <thead>
+              <tr>
+                <th>Payment</th>
+                <th>Reservation</th>
+                <th>Station</th>
+                <th>Amount</th>
+                <th>Status</th>
+                <th>Paid at</th>
+              </tr>
+            </thead>
+
+            <tbody>
+              {data.sessionPayments.map((p) => (
+                <tr key={p.id}>
+                  <td>{p.id}</td>
+                  <td>{p.reservation_id}</td>
+                  <td>{p.station_name}</td>
+                  <td>Rs {Number(p.amount).toFixed(2)}</td>
+                  <td>{p.payment_status}</td>
+                  <td>{new Date(p.paid_at).toLocaleString()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </article>
+    </div>
+  );
+}
+
 function Reviews() {
   return (
     <div className="grid">
@@ -468,6 +1207,8 @@ export default function App() {
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/stations" element={<Stations />} />
         <Route path="/reservations" element={<Reservations />} />
+        <Route path="/account" element={<UserAccount />} />
+        <Route path="/profile" element={<UserProfile />} />
         <Route path="/sessions" element={<Session />} />
         <Route path="/admin" element={<Admin />} />
         <Route path="/reviews" element={<Reviews />} />

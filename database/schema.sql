@@ -46,6 +46,7 @@ CREATE TABLE reservations (
     start_time TIMESTAMPTZ NOT NULL,
     end_time TIMESTAMPTZ NOT NULL,
     status VARCHAR(20) CHECK (status IN ('confirmed', 'active', 'completed', 'cancelled')) DEFAULT 'confirmed',
+    booking_fee DECIMAL(10, 2) NOT NULL DEFAULT 49.00,
     qr_code_token VARCHAR(100) DEFAULT md5(random()::text),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

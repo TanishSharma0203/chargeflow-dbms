@@ -24,6 +24,7 @@ ChargeFlow is a modern DBMS mini-project web application for EV charging station
 2. Run:
    - `database/schema.sql`
    - `database/seed.sql`
+3. If you already created the DB from an older schema, also run `database/migration_booking_fee.sql` once to add the `booking_fee` column.
 
 ### 2) Backend
 
@@ -46,8 +47,11 @@ npm run dev
 
 - `POST /api/auth/signup`
 - `POST /api/auth/login`
+- `GET /api/users/me` (JWT) — profile fields from `users`
+- `GET /api/users/me/account` (JWT) — active reservations, booking-fee ledger, session payments
 - `GET /api/stations`
-- `POST /api/reservations`
+- `POST /api/reservations` (JWT) — charges a non-refundable **booking fee** (`BOOKING_FEE` in `.env`); blocks overlapping bookings for the same user across stations
+- `PATCH /api/reservations/:id` (JWT) — reschedule / change charger while status is `confirmed`
 - `GET /api/reservations/me`
 - `POST /api/sessions/start`
 - `POST /api/sessions/end`
