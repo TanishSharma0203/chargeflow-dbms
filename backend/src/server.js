@@ -107,6 +107,23 @@ const assertChargerSlotFree = async (
   return overlap.rowCount === 0;
 };
 
+const parseReservationWindow = (startTime, endTime) => {
+  const startDate = new Date(startTime);
+  const endDate = new Date(endTime);
+
+  if (
+    Number.isNaN(startDate.getTime()) ||
+    Number.isNaN(endDate.getTime())
+  ) {
+    return null;
+  }
+
+  return {
+    startIso: startDate.toISOString(),
+    endIso: endDate.toISOString(),
+  };
+};
+
 app.get("/api/users/me", auth, async (req, res) => {
   try {
     const result = await pool.query(
@@ -401,6 +418,46 @@ app.get("/api/stations", async (req, res) => {
   }
 });
 
+app.get("/api/chargers", async (req, res) => {
+  try {
+    const { station_id } = req.query;
+    const values = [];
+
+    let sql = `
+      SELECT c.id,
+      c.station_id,
+      c.charger_code,
+      c.charger_type,
+      c.power_kw,
+      c.status,
+      s.station_name,
+      s.location,
+      s.price_per_kwh
+      FROM chargers c
+      JOIN charging_stations s ON s.id=c.station_id
+      WHERE c.status <> 'maintenance'
+    `;
+
+    if (station_id) {
+      values.push(Number(station_id));
+      sql += ` AND c.station_id=$${values.length}`;
+    }
+
+    sql += " ORDER BY s.station_name ASC, c.id ASC";
+
+    const chargers = await pool.query(sql, values);
+
+    res.json(chargers.rows);
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).json({
+      message: "Failed to fetch chargers",
+      detail: error.message,
+    });
+  }
+});
+
 
 
 
@@ -429,8 +486,15 @@ app.post("/api/reservations", auth, async (req, res) => {
       });
     }
 
-    const startIso = new Date(start_time).toISOString();
-    const endIso = new Date(end_time).toISOString();
+    const window = parseReservationWindow(start_time, end_time);
+
+    if (!window) {
+      return res.status(400).json({
+        message: "Enter a valid start and end time",
+      });
+    }
+
+    const { startIso, endIso } = window;
 
     if (new Date(endIso) <= new Date(startIso)) {
       return res.status(400).json({
@@ -439,6 +503,23 @@ app.post("/api/reservations", auth, async (req, res) => {
     }
 
     await client.query("BEGIN");
+
+    const charger = await client.query(
+      `
+      SELECT id
+      FROM chargers
+      WHERE id=$1 AND status <> 'maintenance'
+      `,
+      [charger_id]
+    );
+
+    if (!charger.rowCount) {
+      await client.query("ROLLBACK");
+
+      return res.status(404).json({
+        message: "Charger not found or unavailable for booking",
+      });
+    }
 
     const userOk = await assertUserHasNoOverlappingReservation(
       client,
@@ -562,12 +643,18 @@ app.patch("/api/reservations/:id", auth, async (req, res) => {
   }
 
   const nextChargerId = charger_id ?? row.charger_id;
-  const nextStartIso = start_time
-    ? new Date(start_time).toISOString()
-    : new Date(row.start_time).toISOString();
-  const nextEndIso = end_time
-    ? new Date(end_time).toISOString()
-    : new Date(row.end_time).toISOString();
+  const window = parseReservationWindow(
+    start_time || row.start_time,
+    end_time || row.end_time
+  );
+
+  if (!window) {
+    return res.status(400).json({
+      message: "Enter a valid start and end time",
+    });
+  }
+
+  const { startIso: nextStartIso, endIso: nextEndIso } = window;
 
   if (new Date(nextEndIso) <= new Date(nextStartIso)) {
     return res.status(400).json({
@@ -579,6 +666,23 @@ app.patch("/api/reservations/:id", auth, async (req, res) => {
 
   try {
     await client.query("BEGIN");
+
+    const charger = await client.query(
+      `
+      SELECT id
+      FROM chargers
+      WHERE id=$1 AND status <> 'maintenance'
+      `,
+      [nextChargerId]
+    );
+
+    if (!charger.rowCount) {
+      await client.query("ROLLBACK");
+
+      return res.status(404).json({
+        message: "Charger not found or unavailable for booking",
+      });
+    }
 
     const userOk = await assertUserHasNoOverlappingReservation(
       client,

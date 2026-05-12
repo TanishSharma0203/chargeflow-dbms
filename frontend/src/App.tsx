@@ -44,6 +44,18 @@ type Station = {
   rating: number;
 };
 
+type ChargerOption = {
+  id: number;
+  station_id: number;
+  charger_code: string;
+  charger_type: string;
+  power_kw: string | number;
+  status: string;
+  station_name: string;
+  location: string;
+  price_per_kwh: string | number;
+};
+
 const BOOKING_FEE_DISPLAY =
   import.meta.env.VITE_BOOKING_FEE ?? "49";
 
@@ -587,10 +599,41 @@ function Stations() {
 
 function Reservations() {
   const { token, loading } = useAuth();
+  const navigate = useNavigate();
+  const [chargers, setChargers] = useState<ChargerOption[]>([]);
+  const [loadingChargers, setLoadingChargers] = useState(true);
   const [chargerId, setChargerId] = useState("");
   const [startTime, setStartTime] = useState("");
   const [endTime, setEndTime] = useState("");
   const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { data } = await api.get<ChargerOption[]>("/api/chargers");
+
+        if (!cancelled) {
+          setChargers(data);
+        }
+      } catch (error) {
+        console.error("Failed to fetch chargers", error);
+
+        if (!cancelled) {
+          setMessage("Could not load chargers. Check the backend connection.");
+        }
+      } finally {
+        if (!cancelled) {
+          setLoadingChargers(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleReservation = async () => {
     if (!token) {
@@ -599,8 +642,14 @@ function Reservations() {
       return;
     }
 
+    if (!chargerId || !startTime || !endTime) {
+      setMessage("Choose a charger and enter both start and end time.");
+
+      return;
+    }
+
     try {
-      setMessage("Processing reservation…");
+      setMessage("Processing reservation...");
 
       const response = await api.post("/api/reservations", {
         charger_id: Number(chargerId),
@@ -616,10 +665,7 @@ function Reservations() {
         );
 
         toast.success("Reservation created");
-
-        setChargerId("");
-        setStartTime("");
-        setEndTime("");
+        navigate("/account");
       } else {
         setMessage("Unexpected response from server.");
       }
@@ -640,7 +686,7 @@ function Reservations() {
   if (loading) {
     return (
       <div className="card form">
-        <p>Loading session…</p>
+        <p>Loading session...</p>
       </div>
     );
   }
@@ -666,11 +712,25 @@ function Reservations() {
         </p>
       )}
 
-      <input
-        placeholder="Enter Charger ID"
+      <label htmlFor="charger-pick">Charger</label>
+
+      <select
+        id="charger-pick"
         value={chargerId}
         onChange={(e) => setChargerId(e.target.value)}
-      />
+        disabled={loadingChargers}
+      >
+        <option value="">
+          {loadingChargers ? "Loading chargers..." : "Select a charger"}
+        </option>
+
+        {chargers.map((charger) => (
+          <option key={charger.id} value={charger.id}>
+            #{charger.id} - {charger.station_name} - {charger.charger_code} (
+            {charger.charger_type}, {Number(charger.power_kw)} kW)
+          </option>
+        ))}
+      </select>
 
       <input
         type="datetime-local"
@@ -694,14 +754,14 @@ function Reservations() {
         className="btn"
         type="button"
         onClick={handleReservation}
-        disabled={!token}
+        disabled={!token || loadingChargers}
       >
         Confirm reservation
       </button>
 
       {!token && (
         <p style={{ marginTop: "8px", opacity: 0.85 }}>
-          Use <Link to="/auth">Sign in</Link> first — the button stays disabled
+          Use <Link to="/auth">Sign in</Link> first - the button stays disabled
           until you are logged in.
         </p>
       )}
@@ -718,7 +778,7 @@ function Reservations() {
       )}
     </div>
   );
-} 
+}
 
 function Session() {
   return (
@@ -761,36 +821,30 @@ function UserProfile() {
   const [profile, setProfile] = useState<ProfileRow | null>(null);
   const [error, setError] = useState("");
 
-  useEffect(() => {
+  const loadProfile = useCallback(async () => {
     if (!token) {
       return;
     }
 
-    let cancelled = false;
+    try {
+      const { data } = await api.get<ProfileRow>("/api/users/me");
 
-    (async () => {
-      try {
-        const { data } = await api.get<ProfileRow>("/api/users/me");
-
-        if (!cancelled) {
-          setProfile(data);
-          setError("");
-        }
-      } catch (err) {
-        if (!cancelled) {
-          if (axios.isAxiosError(err) && err.response?.status === 401) {
-            logout();
-          } else {
-            setError("Could not load profile.");
-          }
-        }
+      setProfile(data);
+      setError("");
+    } catch (err) {
+      if (axios.isAxiosError(err) && err.response?.status === 401) {
+        logout();
+      } else if (axios.isAxiosError(err) && err.response?.data?.message) {
+        setError(String(err.response.data.message));
+      } else {
+        setError("Could not load profile. Check that the backend is running.");
       }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
+    }
   }, [token, logout]);
+
+  useEffect(() => {
+    loadProfile();
+  }, [loadProfile]);
 
   if (loading) {
     return (
@@ -808,6 +862,10 @@ function UserProfile() {
     return (
       <div className="card">
         <p>{error}</p>
+
+        <button className="btn" type="button" onClick={loadProfile}>
+          Try again
+        </button>
       </div>
     );
   }
@@ -835,19 +893,19 @@ function UserProfile() {
           <tbody>
             <tr>
               <th>Name</th>
-              <td>{profile.name}</td>
+              <td>{profile.name || "Not provided"}</td>
             </tr>
             <tr>
               <th>Email</th>
-              <td>{profile.email}</td>
+              <td>{profile.email || "Not provided"}</td>
             </tr>
             <tr>
               <th>Phone</th>
-              <td>{profile.phone}</td>
+              <td>{profile.phone || "Not provided"}</td>
             </tr>
             <tr>
               <th>Vehicle</th>
-              <td>{profile.vehicle_type}</td>
+              <td>{profile.vehicle_type || "Not provided"}</td>
             </tr>
             <tr>
               <th>Member since</th>
